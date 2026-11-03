@@ -4,7 +4,8 @@ name: Build the OpenFlux core with the Avito keepalive
 # from .github/patches: the keepalive (Avito closes a room's connection after a
 # quiet minute, so the unpatched core reconnects every room each minute and
 # never keeps its lanes up) and the lane order (rooms come up as send/receive
-# pairs, so the first handshakes give whole lanes). The binaries and their
+# pairs, so the first handshakes give whole lanes), plus the handshake turn
+# given back by a room that stopped waiting and a 60 s client handshake. The binaries and their
 # SHA-256 sums are published as a release of this repository, where OpenFlux
 # Panel downloads the core from.
 on:
@@ -16,7 +17,7 @@ on:
         required: true
       tag:
         description: 'Release tag in this repository'
-        default: 'core-v0.17.1-ka2'
+        default: 'core-v0.17.1-ka3'
         required: true
 
 permissions:
@@ -42,6 +43,8 @@ jobs:
         run: |
           python3 .github/patches/avito_keepalive.py core/transport/avito/avito.go
           python3 .github/patches/avito_pairs.py core/transport/avito/avito.go
+          python3 .github/patches/avito_gate_refund.py core/transport/avito
+          python3 .github/patches/session_handshake_timeout.py core/transport/session.go
           git -C core diff
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -80,6 +83,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           CORE_REF: ${{ inputs.core_ref }}
         run: |
-          notes="OpenFlux core $CORE_REF (p1neappleXpress/OpenFlux) with two Avito fixes (.github/patches): a WebSocket ping every 20 s, so Avito does not close idle rooms after a minute (avito_keepalive.py), and rooms started as send/receive pairs, so a side can hear its peer from the first handshakes (avito_pairs.py)."
+          notes="OpenFlux core $CORE_REF (p1neappleXpress/OpenFlux) with Avito fixes (.github/patches): a WebSocket ping every 20 s, so Avito does not close idle rooms after a minute (avito_keepalive.py), rooms started as send/receive pairs, so a side can hear its peer from the first handshakes (avito_pairs.py), the handshake turn of a room that stopped waiting given back (avito_gate_refund.py) and a 60 s client handshake (session_handshake_timeout.py)."
           gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag
           gh release create "$TAG" dist/* --title "OpenFlux core $CORE_REF + Avito fixes ($TAG)" --notes "$notes" --target "$GITHUB_SHA"
