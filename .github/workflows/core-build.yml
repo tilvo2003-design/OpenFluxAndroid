@@ -1,0 +1,83 @@
+name: Build the OpenFlux core with the Avito keepalive
+
+# Builds the exit-node core (p1neappleXpress/OpenFlux) with one change, the
+# Avito keepalive in .github/patches/avito_keepalive.py: Avito closes a room's
+# connection after a quiet minute, so the unpatched core reconnects every room
+# each minute and never keeps its Avito lanes up. The binaries and their
+# SHA-256 sums are published as a release of this repository, where OpenFlux
+# Panel downloads the core from.
+on:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: 'p1neappleXpress/OpenFlux tag or commit'
+        default: 'v0.17.1'
+        required: true
+      tag:
+        description: 'Release tag in this repository'
+        default: 'core-v0.17.1-ka1'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: p1neappleXpress/OpenFlux
+          ref: ${{ inputs.core_ref }}
+          path: core
+          fetch-depth: 0
+
+      - name: Patch the Avito keepalive
+        run: |
+          python3 .github/patches/avito_keepalive.py core/transport/avito/avito.go
+          git -C core diff
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Test the Avito carrier
+        working-directory: core
+        run: go test ./transport/avito/...
+
+      - name: Build
+        working-directory: core
+        env:
+          CORE_REF: ${{ inputs.core_ref }}
+        run: |
+          mkdir -p ../dist
+          ver="${CORE_REF}-keepalive"
+          ldflags="-s -w -X main.Version=$ver -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.CommitHash=$(git rev-parse --short HEAD)"
+          for t in linux/arm64 linux/amd64 linux/arm windows/amd64; do
+            os=${t%/*}; arch=${t#*/}
+            out="../dist/openflux-$os-$arch"; [ "$os" = windows ] && out="$out.exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "$out" .
+          done
+          cd ../dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: openflux-core-${{ inputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          CORE_REF: ${{ inputs.core_ref }}
+        run: |
+          notes="OpenFlux core $CORE_REF (p1neappleXpress/OpenFlux) with the Avito keepalive (.github/patches/avito_keepalive.py): a WebSocket ping every 20 s, so Avito does not close idle rooms after a minute."
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag
+          gh release create "$TAG" dist/* --title "OpenFlux core $CORE_REF + Avito keepalive" --notes "$notes" --target "$GITHUB_SHA"

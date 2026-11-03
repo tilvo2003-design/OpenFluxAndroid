@@ -1,9 +1,10 @@
 name: Build with DNS through the tunnel
 
-# Builds OpenFluxAndroid from this fork's main branch with one change: the
+# Builds OpenFluxAndroid from this fork's main branch with two changes: the
 # phone's DNS goes through the tunnel to a home resolver (default
 # 192.168.1.1), instead of being answered from the phone by the mobile
-# network's resolver. The APKs are signed with the keystore in the
+# network's resolver; and the core keeps its Avito rooms connected
+# (.github/patches/avito_keepalive.py). The APKs are signed with the keystore in the
 # repository secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD
 # (alias "openflux") and attached to the run as an artifact.
 on:
@@ -15,7 +16,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.14.1'
+        default: '3.14.2'
         required: true
 
 permissions:
@@ -31,6 +32,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+
+      - name: Patch the Avito keepalive into the core
+        run: python3 .github/patches/avito_keepalive.py OpenFlux/transport/avito/avito.go
 
       - name: Patch DNS through the tunnel
         env:
@@ -76,6 +80,10 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+
+      - name: Test the Avito carrier
+        working-directory: OpenFlux
+        run: go test ./transport/avito/...
 
       - name: Install gomobile
         run: |
