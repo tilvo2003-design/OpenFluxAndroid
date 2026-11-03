@@ -16,7 +16,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.14.4'
+        default: '3.14.5'
         required: true
 
 permissions:
@@ -37,6 +37,7 @@ jobs:
         run: |
           python3 .github/patches/avito_keepalive.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_pairs.py OpenFlux/transport/avito/avito.go
+          python3 .github/patches/avito_op_limit.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
 
