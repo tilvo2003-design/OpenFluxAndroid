@@ -3,8 +3,8 @@ name: Build with DNS through the tunnel
 # Builds OpenFluxAndroid from this fork's main branch with two changes: the
 # phone's DNS goes through the tunnel to a home resolver (default
 # 192.168.1.1), instead of being answered from the phone by the mobile
-# network's resolver; and the core keeps its Avito rooms connected
-# (.github/patches/avito_keepalive.py). The APKs are signed with the keystore in the
+# network's resolver; and the core keeps its Avito rooms connected and brings
+# them up in lanes (.github/patches), with 90 s instead of 30 s to connect. The APKs are signed with the keystore in the
 # repository secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD
 # (alias "openflux") and attached to the run as an artifact.
 on:
@@ -16,7 +16,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.14.2'
+        default: '3.14.3'
         required: true
 
 permissions:
@@ -33,8 +33,18 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Patch the Avito keepalive into the core
-        run: python3 .github/patches/avito_keepalive.py OpenFlux/transport/avito/avito.go
+      - name: Patch the Avito fixes into the core
+        run: |
+          python3 .github/patches/avito_keepalive.py OpenFlux/transport/avito/avito.go
+          python3 .github/patches/avito_pairs.py OpenFlux/transport/avito/avito.go
+
+      - name: Wait longer for a slow carrier
+        # 30 s is too little for a document carrier, which Avito lets in
+        # one room per 12 s; 90 s.
+        run: |
+          f=androidApp/src/main/kotlin/io/openflux/android/core/AndroidConnectionService.kt
+          grep -q 'CONNECT_TIMEOUT_MS = 30_000L' "$f" || { echo "::error::CONNECT_TIMEOUT_MS changed upstream"; exit 1; }
+          sed -i 's/CONNECT_TIMEOUT_MS = 30_000L/CONNECT_TIMEOUT_MS = 90_000L/' "$f"
 
       - name: Patch DNS through the tunnel
         env:
