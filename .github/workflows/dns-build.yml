@@ -41,6 +41,7 @@ jobs:
           python3 .github/patches/avito_room_spent.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
+          python3 .github/patches/telemost_full_slots.py OpenFlux/transport/yandex/telemost.go
 
       - name: Wait longer for a slow carrier
         # 30 s is too little for a document carrier, which Avito lets in
