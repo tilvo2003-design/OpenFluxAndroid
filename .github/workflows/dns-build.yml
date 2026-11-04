@@ -16,7 +16,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.14.6'
+        default: '3.14.7'
         required: true
 
 permissions:
