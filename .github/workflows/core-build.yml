@@ -17,7 +17,7 @@ on:
         required: true
       tag:
         description: 'Release tag in this repository'
-        default: 'core-v0.17.1-ka8'
+        default: 'core-v0.17.1-ka9'
         required: true
 
 permissions:
@@ -48,6 +48,7 @@ jobs:
           python3 .github/patches/avito_rooms_up.py core/transport/avito/avito.go
           python3 .github/patches/avito_join_new.py core/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py core/transport/avito
+          python3 .github/patches/avito_rotate.py core/transport/avito
           python3 .github/patches/session_handshake_timeout.py core/transport/session.go
           python3 .github/patches/carrier_health.py core
           python3 .github/patches/rooms_progress.py core
@@ -98,6 +99,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           CORE_REF: ${{ inputs.core_ref }}
         run: |
-          notes="OpenFlux core $CORE_REF (p1neappleXpress/OpenFlux) with Avito fixes (.github/patches): a WebSocket ping every 20 s, so Avito does not close idle rooms after a minute (avito_keepalive.py), rooms started as send/receive pairs, so a side can hear its peer from the first handshakes (avito_pairs.py), the handshake turn of a room that stopped waiting given back (avito_gate_refund.py), Avito's per-room operation limit waited out on the same connection (avito_op_limit.py), a room whose data budget is spent left alone (avito_room_spent.py), the number of rooms connected on the normal log for OpenFlux Panel (avito_rooms_up.py), new rooms joined right away (avito_join_new.py), room creation on the normal log (rooms_progress.py), a carrier that delivers little passed over while another is healthy (carrier_health.py), a 60 s client handshake (session_handshake_timeout.py), and the android build told it runs on Android 11+ so WebRTC can list the network interfaces (android_anet.py)."
+          notes="OpenFlux core $CORE_REF (p1neappleXpress/OpenFlux) with Avito fixes (.github/patches): a WebSocket ping every 20 s, so Avito does not close idle rooms after a minute (avito_keepalive.py), rooms started as send/receive pairs, so a side can hear its peer from the first handshakes (avito_pairs.py), the handshake turn of a room that stopped waiting given back (avito_gate_refund.py), Avito's per-room operation limit waited out on the same connection (avito_op_limit.py), a room whose data budget is spent left alone (avito_room_spent.py), the number of rooms connected on the normal log for OpenFlux Panel (avito_rooms_up.py), new rooms joined right away (avito_join_new.py), a spent room's lane given new rooms through a control room, with the same link (avito_rotate.py), room creation on the normal log (rooms_progress.py), a carrier that delivers little passed over while another is healthy (carrier_health.py), a 60 s client handshake (session_handshake_timeout.py), and the android build told it runs on Android 11+ so WebRTC can list the network interfaces (android_anet.py)."
           gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag
           gh release create "$TAG" dist/* --title "OpenFlux core $CORE_REF + Avito fixes ($TAG)" --notes "$notes" --target "$GITHUB_SHA"

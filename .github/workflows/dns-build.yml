@@ -18,7 +18,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.15.1'
+        default: '3.15.2'
         required: true
       core:
         description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
@@ -62,7 +62,10 @@ jobs:
           python3 .github/patches/avito_pairs.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_op_limit.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_room_spent.py OpenFlux/transport/avito/avito.go
+          python3 .github/patches/avito_rooms_up.py OpenFlux/transport/avito/avito.go
+          python3 .github/patches/avito_join_new.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
+          python3 .github/patches/avito_rotate.py OpenFlux/transport/avito
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
           python3 .github/patches/carrier_health.py OpenFlux
           python3 .github/patches/rooms_progress.py OpenFlux
