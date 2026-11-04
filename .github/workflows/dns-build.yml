@@ -18,7 +18,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.15.2'
+        default: '3.15.3'
         required: true
       core:
         description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
@@ -70,6 +70,7 @@ jobs:
           python3 .github/patches/session_exit_quiet.py OpenFlux/transport
           python3 .github/patches/carrier_health.py OpenFlux
           python3 .github/patches/rooms_progress.py OpenFlux
+          python3 .github/patches/cups_shared_session.py OpenFlux/transport/cupsonline
           python3 .github/patches/telemost_full_slots.py OpenFlux/transport/yandex/telemost.go
 
       - name: Wait longer for a slow carrier
