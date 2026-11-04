@@ -67,6 +67,7 @@ jobs:
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
           python3 .github/patches/avito_rotate.py OpenFlux/transport/avito
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
+          python3 .github/patches/session_exit_quiet.py OpenFlux/transport
           python3 .github/patches/carrier_health.py OpenFlux
           python3 .github/patches/rooms_progress.py OpenFlux
           python3 .github/patches/telemost_full_slots.py OpenFlux/transport/yandex/telemost.go
