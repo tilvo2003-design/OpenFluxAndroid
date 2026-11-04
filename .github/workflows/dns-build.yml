@@ -4,7 +4,9 @@ name: Build with DNS through the tunnel
 # phone's DNS goes through the tunnel to a home resolver (default
 # 192.168.1.1), instead of being answered from the phone by the mobile
 # network's resolver; and the core keeps its Avito rooms connected and brings
-# them up in lanes (.github/patches), with 90 s instead of 30 s to connect. The APKs are signed with the keystore in the
+# them up in lanes (.github/patches), with 90 s instead of 30 s to connect;
+# by default on the node's core (p1neappleXpress/OpenFlux v0.17.1) instead of
+# the 0.15.1 the app pins. The APKs are signed with the keystore in the
 # repository secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD
 # (alias "openflux") and attached to the run as an artifact.
 on:
@@ -16,7 +18,11 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.14.7'
+        default: '3.15.0'
+        required: true
+      core:
+        description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
+        default: 'v0.17.1'
         required: true
 
 permissions:
@@ -32,6 +38,23 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+
+      - name: Use the node's core in the app
+        # The submodule pins core 0.15.1; the node runs 0.17.1, whose
+        # Telemost, pinned encryption context (no context guessing at the
+        # handshake), carrier MTU and control frames the app then shares.
+        if: inputs.core != 'submodule'
+        env:
+          CORE: ${{ inputs.core }}
+        run: |
+          [[ "$CORE" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::core '$CORE' is not a tag"; exit 1; }
+          rm -rf OpenFlux
+          git clone --quiet --branch "$CORE" https://github.com/p1neappleXpress/OpenFlux.git OpenFlux
+          git -C OpenFlux log --oneline -1
+          # core 0.17 renamed captcha to prompt across the mobile API
+          f=androidApp/src/main/kotlin/io/openflux/android/core/AndroidConnectionService.kt
+          sed -i -E 's/Mobile\.(pending|cancel|submit)Captcha/Mobile.\1Prompt/g' "$f"
+          ! grep -rn 'Mobile\.[a-zA-Z]*Captcha' androidApp/src shared/src || { echo "::error::a Mobile captcha call is left"; exit 1; }
 
       - name: Patch the Avito fixes into the core
         run: |
