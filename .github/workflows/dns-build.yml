@@ -18,7 +18,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.15.0'
+        default: '3.15.1'
         required: true
       core:
         description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
@@ -64,6 +64,8 @@ jobs:
           python3 .github/patches/avito_room_spent.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
+          python3 .github/patches/carrier_health.py OpenFlux
+          python3 .github/patches/rooms_progress.py OpenFlux
           python3 .github/patches/telemost_full_slots.py OpenFlux/transport/yandex/telemost.go
 
       - name: Wait longer for a slow carrier
@@ -119,9 +121,9 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
 
-      - name: Test the Avito carrier
+      - name: Test the patched carriers and the Session
         working-directory: OpenFlux
-        run: go test ./transport/avito/...
+        run: go test ./transport/ ./transport/avito/... ./transport/cupsonline/...
 
       - name: Install gomobile
         run: |
