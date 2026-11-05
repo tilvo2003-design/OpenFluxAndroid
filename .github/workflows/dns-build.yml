@@ -73,6 +73,8 @@ jobs:
           python3 .github/patches/exit_udp_idle.py OpenFlux/tunnel/tunnel.go
           python3 .github/patches/session_handshake_timeout.py OpenFlux/transport/session.go
           python3 .github/patches/session_exit_quiet.py OpenFlux/transport
+          python3 .github/patches/session_exit_idle.py OpenFlux/transport
+          python3 .github/patches/telemost_idle.py OpenFlux/transport/yandex/telemost.go
           python3 .github/patches/carrier_health.py OpenFlux
           python3 .github/patches/rooms_progress.py OpenFlux
           python3 .github/patches/cups_shared_session.py OpenFlux/transport/cupsonline
