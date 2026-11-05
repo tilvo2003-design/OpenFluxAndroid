@@ -42,14 +42,38 @@ var (
 	// ctlStartWait is how long Start waits for the control room before it
 	// goes on with the rooms of the link.
 	ctlStartWait = 30 * time.Second
-	// A lane whose new rooms are spent within laneQuick waits before it gets
-	// more: lanePauseMin, doubling up to lanePauseMax. Every new room costs
-	// two of Avito's handshakes (join, connect), shared by every node of the
-	// address, so a lane that eats rooms must not starve the others.
-	laneQuick    = 5 * time.Minute
-	lanePauseMin = time.Minute
-	lanePauseMax = 30 * time.Minute
+	// A lane whose rooms took less than laneQuickBytes before Avito refused
+	// them waits before it gets more: lanePauseMin, doubling up to
+	// lanePauseMax. Every new room costs two of Avito's handshakes (join,
+	// connect), shared by every node of the address, so rooms that die for
+	// another reason than their data must not starve the others.
+	laneQuickBytes uint64 = 2 << 20
+	lanePauseMin          = time.Minute
+	lanePauseMax          = 30 * time.Minute
+
+	// The exit replaces a lane's rooms before Avito refuses them: once either
+	// room took laneBudget(lane) bytes. Avito stops at ~19.5 MB of ops in a
+	// room, ~14 MB of ours (they go as base64), and the stripe fills its lanes
+	// evenly, so they would all run out together and the replacements queue
+	// up at Avito's handshake budget for minutes; the budgets run from
+	// budgetLow (lane 1) to budgetHigh (the last), so the lanes take turns.
+	// AVITO_BUDGET_MB sets budgetHigh (budgetLow is half of it).
+	budgetLow, budgetHigh = budgetFromEnv()
+	budgetEvery           = 5 * time.Second
 )
+
+func budgetFromEnv() (uint64, uint64) {
+	hi := uint64(envKB("AVITO_BUDGET_MB", 12)) << 20
+	return hi / 2, hi
+}
+
+// laneBudget is how much lane may take into one of its rooms.
+func (r *rotation) laneBudget(lane, lanes int) uint64 {
+	if lanes <= 1 {
+		return r.budgetHigh
+	}
+	return r.budgetLow + (r.budgetHigh-r.budgetLow)*uint64(lane)/uint64(lanes-1)
+}
 
 var errMoved = errors.New("avito: the room was replaced")
 
@@ -106,7 +130,12 @@ type rotation struct {
 	busy    map[int]bool
 	movedAt map[int]time.Time
 	pause   map[int]time.Duration
-	told    map[string]bool // client: rooms reported spent
+	budget  bool // budgetLoop runs
+
+	// The settings above as Start found them.
+	budgetLow, budgetHigh, quickBytes uint64
+	budgetEvery                       time.Duration
+	told                              map[string]bool // client: rooms reported spent
 
 	create sync.Mutex // the exit makes one lane's rooms at a time
 }
@@ -146,6 +175,7 @@ func (t *AvitoTransport) startRotation(ids []string) []string {
 	}
 	r.mu.Lock()
 	r.ids = append([]string(nil), ids...)
+	r.budgetLow, r.budgetHigh, r.quickBytes, r.budgetEvery = budgetLow, budgetHigh, laneQuickBytes, budgetEvery
 	r.mu.Unlock()
 	r.ctl = newCtlLog(t, r.ctlID, t.onCtlText)
 	go r.ctl.run()
@@ -191,13 +221,52 @@ func (t *AvitoTransport) wireRotation() {
 		}
 	}
 	r.byPos = byPos
+	if !t.isClient && !r.budget {
+		r.budget = true
+		go t.budgetLoop()
+	}
+}
+
+// budgetLoop (exit) replaces a lane's rooms once one of them took its budget.
+func (t *AvitoTransport) budgetLoop() {
+	tick := time.NewTicker(t.rot.budgetEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-tick.C:
+		}
+		r := &t.rot
+		r.mu.Lock()
+		byPos := r.byPos
+		r.mu.Unlock()
+		half := len(byPos) / 2
+		for lane := 0; lane < half; lane++ {
+			used := max(byPos[lane].used(), byPos[half+lane].used())
+			if b := r.laneBudget(lane, half); used >= b {
+				t.replaceLane(lane, fmt.Sprintf("its rooms took %.1f MB (budget %.1f MB)", mb(used), mb(b)))
+			}
+		}
+	}
+}
+
+func mb(n uint64) float64 { return float64(n) / (1 << 20) }
+
+// used is what this room carried since this side moved into it.
+func (w *avitoWS) used() uint64 {
+	total := w.stats.bytesSent.Load() + w.stats.bytesRecv.Load()
+	if base := w.budgetBase.Load(); total > base {
+		return total - base
+	}
+	return 0
 }
 
 // roomSpent: Avito refuses this side's data in room id.
 func (t *AvitoTransport) roomSpent(id string) {
 	r := &t.rot
 	if !t.isClient {
-		t.replaceLaneOf(id)
+		t.replaceLaneOf(id, "Avito refuses data in room "+short(id))
 		return
 	}
 	r.mu.Lock()
@@ -220,7 +289,7 @@ func (t *AvitoTransport) onCtlText(text string) {
 	}
 	if !t.isClient {
 		for _, id := range spent {
-			t.replaceLaneOf(id)
+			t.replaceLaneOf(id, "the client cannot write into room "+short(id))
 		}
 	}
 }
@@ -291,7 +360,7 @@ func short(id string) string {
 }
 
 // replaceLaneOf gives the lane of room id new rooms, if id is in use.
-func (t *AvitoTransport) replaceLaneOf(id string) {
+func (t *AvitoTransport) replaceLaneOf(id, why string) {
 	r := &t.rot
 	r.mu.Lock()
 	lane := -1
@@ -303,13 +372,13 @@ func (t *AvitoTransport) replaceLaneOf(id string) {
 	}
 	r.mu.Unlock()
 	if lane >= 0 {
-		t.replaceLane(lane)
+		t.replaceLane(lane, why)
 	}
 }
 
 // replaceLane (exit) makes lane two new rooms, writes the new list to the
 // control room and moves over.
-func (t *AvitoTransport) replaceLane(lane int) {
+func (t *AvitoTransport) replaceLane(lane int, why string) {
 	r := &t.rot
 	r.mu.Lock()
 	if r.busy == nil {
@@ -320,8 +389,20 @@ func (t *AvitoTransport) replaceLane(lane int) {
 		return
 	}
 	r.busy[lane] = true
+	// What the lane's rooms took: little means they died of something else
+	// than their data, and the next ones wait.
+	var used uint64
+	if half := len(r.byPos) / 2; lane < half {
+		used = max(r.byPos[lane].used(), r.byPos[half+lane].used())
+	}
+	if used < r.quickBytes && !r.movedAt[lane].IsZero() {
+		r.pause[lane] = min(max(2*r.pause[lane], lanePauseMin), lanePauseMax)
+	} else {
+		r.pause[lane] = 0
+	}
 	wait := time.Until(r.movedAt[lane].Add(r.pause[lane]))
 	r.mu.Unlock()
+	utils.Infof("[AVITO] lane %d: new rooms, %s", lane+1, why)
 	go func() {
 		defer func() {
 			r.mu.Lock()
@@ -329,7 +410,7 @@ func (t *AvitoTransport) replaceLane(lane int) {
 			r.mu.Unlock()
 		}()
 		if wait > 0 {
-			utils.Infof("[AVITO] lane %d: new rooms in %v (Avito took its last ones quickly)", lane+1, wait.Round(time.Second))
+			utils.Infof("[AVITO] lane %d: new rooms in %v (its last ones carried little)", lane+1, wait.Round(time.Second))
 			if !sleepCtx(t.ctx, wait) {
 				return
 			}
@@ -345,13 +426,7 @@ func (t *AvitoTransport) replaceLane(lane int) {
 		half := len(ids) / 2
 		ids[lane], ids[half+lane] = a, b
 		gen := r.gen + 1
-		now := time.Now()
-		if !r.movedAt[lane].IsZero() && now.Sub(r.movedAt[lane]) < laneQuick {
-			r.pause[lane] = min(max(2*r.pause[lane], lanePauseMin), lanePauseMax)
-		} else {
-			r.pause[lane] = 0
-		}
-		r.movedAt[lane] = now
+		r.movedAt[lane] = time.Now()
 		r.mu.Unlock()
 		utils.Infof("[AVITO] lane %d: new rooms %s and %s (generation %d)", lane+1, a[:8], b[:8], gen)
 		r.ctl.append(fmt.Sprintf("R %d %s", gen, t.packRooms(ids)))
@@ -394,8 +469,10 @@ func (w *avitoWS) room() string {
 	return w.roomID
 }
 
-// moveTo makes the room's connection go over to room id.
+// moveTo makes the room's connection go over to room id; its budget starts
+// again.
 func (w *avitoWS) moveTo(id string) {
+	w.budgetBase.Store(w.stats.bytesSent.Load() + w.stats.bytesRecv.Load())
 	w.next.Store(&id)
 	w.writeMu.Lock()
 	if w.conn != nil {

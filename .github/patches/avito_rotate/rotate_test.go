@@ -280,7 +280,7 @@ func TestStartFollowsTheLog(t *testing.T) {
 	link := exit.RoomList()
 	first := roomsOf(exit)
 	f.spend(first[1])
-	exit.replaceLaneOf(first[1])
+	exit.replaceLaneOf(first[1], "test")
 	waitFor(t, 10*time.Second, "lane 2 replaced", func() bool { return roomsOf(exit)[1] != first[1] })
 	want := roomsOf(exit)
 	waitFor(t, 10*time.Second, "the new list in the log", func() bool {
@@ -326,5 +326,39 @@ func TestControlLogAppendsFromBothEnds(t *testing.T) {
 			}
 		}
 		return true
+	})
+}
+
+// The exit gives a lane new rooms before Avito would refuse them, while the
+// stream goes on whole (the lanes keep moving during the check too).
+func TestLanesGetNewRoomsBeforeTheirBudgetRunsOut(t *testing.T) {
+	r := &rotation{budgetLow: 6 << 20, budgetHigh: 12 << 20}
+	if b := r.laneBudget(0, 8); b != 6<<20 || r.laneBudget(7, 8) != 12<<20 || r.laneBudget(3, 8) <= b {
+		t.Fatalf("budgets %d..%d not staggered", r.laneBudget(0, 8), r.laneBudget(7, 8))
+	}
+	fastRotation(t)
+	oldLow, oldHigh, oldEvery, oldQuick := budgetLow, budgetHigh, budgetEvery, laneQuickBytes
+	budgetLow, budgetHigh, budgetEvery, laneQuickBytes = 300<<10, 900<<10, 100*time.Millisecond, 1
+	t.Cleanup(func() { budgetLow, budgetHigh, budgetEvery, laneQuickBytes = oldLow, oldHigh, oldEvery, oldQuick })
+	newFakeAvito(t, time.Millisecond)
+	cfg := fastConfig()
+	cfg.NumRooms = 2
+	exit, client := startStripedPair(t, cfg)
+	first := roomsOf(exit)
+	stop := make(chan struct{})
+	streaming := streamDown(t, exit, stop)
+	waitFor(t, 30*time.Second, "both lanes on new rooms at both ends", func() bool {
+		now := roomsOf(exit)
+		return now[0] != first[0] && now[1] != first[1] && sameRooms(roomsOf(client), now) &&
+			roomsFollow(exit, now) && roomsFollow(client, now)
+	})
+	close(stop)
+	<-streaming
+	checkStillCarries(t, exit, client)
+	// The lanes go on moving for a moment: let them finish before the fake goes.
+	waitFor(t, 30*time.Second, "the last replacements done", func() bool {
+		exit.rot.mu.Lock()
+		defer exit.rot.mu.Unlock()
+		return len(exit.rot.busy) == 0
 	})
 }

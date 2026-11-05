@@ -45,10 +45,11 @@ patch("avito.go", [
 	// Rotation (avito_rotate.py): the room to move to, what to do when
 	// Avito refuses this side's data here, roomID for other goroutines, and
 	// the document's text as subscribed.
-	next    atomic.Pointer[string]
-	onSpent func(id string)
-	idMu    sync.Mutex
-	snap    string
+	next       atomic.Pointer[string]
+	onSpent    func(id string)
+	idMu       sync.Mutex
+	snap       string
+	budgetBase atomic.Uint64 // bytesSent+bytesRecv when this side moved into the room
 """, 1),
     ("""	data, _ := doc["data"].(string)
 	w.docLen = len(data)

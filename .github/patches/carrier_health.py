@@ -73,11 +73,17 @@ func (s *StripedTransport) Degraded() bool {
 	if m, ok := stripeHealth.Load(s); ok && now.Sub(m.(healthMemo).at) < healthCacheFor {
 		return m.(healthMemo).bad
 	}
+	// A lane the far side says it does not hear carries nothing on purpose
+	// (stripe_watch_source.py): not a dead lane.
+	var skip [maxStripeLanes]bool
+	for i := range skip {
+		skip[i] = s.unwatched(i, now)
+	}
 	q := &s.snd
 	q.mu.Lock()
 	started, dead := 0, 0
 	for i := range q.lane {
-		if !q.lane[i].started {
+		if !q.lane[i].started || skip[i] {
 			continue
 		}
 		started++
