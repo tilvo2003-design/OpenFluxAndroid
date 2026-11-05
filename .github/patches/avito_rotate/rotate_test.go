@@ -12,6 +12,10 @@ import (
 	"github.com/p1neappleXpress/OpenFlux/transport"
 )
 
+// No spare rooms in the tests unless one asks: a reserve being made up when
+// a test ends would still be calling the fake Avito the test took down.
+func init() { sparePairs = 0 }
+
 func (f *fakeAvito) spend(room string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -81,12 +85,15 @@ func TestParseCtlLog(t *testing.T) {
 	l1 := transport.PackRooms([]string{"a", "b"}, true)
 	l2 := transport.PackRooms([]string{"c", "b"}, true)
 	text := "R 1 " + l1 + "\nS a\ngarbage\nR 2 " + l2 + "\nR x " + l1 + "\nS b\n"
-	gen, ids, spent := parseCtlLog(text)
+	gen, ids, spent, used := parseCtlLog(text + "U c 100\nU c 300\nU b x\n")
 	if gen != 2 || strings.Join(ids, ",") != "c,b" || strings.Join(spent, ",") != "a,b" {
 		t.Fatalf("got %d %v %v", gen, ids, spent)
 	}
+	if len(used) != 1 || used["c"] != 300 {
+		t.Fatalf("used %v, want c: 300", used)
+	}
 	// Lines merged in another order mean the same.
-	gen2, ids2, _ := parseCtlLog("R 2 " + l2 + "\nS a\nR 1 " + l1 + "\n")
+	gen2, ids2, _, _ := parseCtlLog("R 2 " + l2 + "\nS a\nR 1 " + l1 + "\n")
 	if gen2 != 2 || strings.Join(ids2, ",") != "c,b" {
 		t.Fatalf("reordered: %d %v", gen2, ids2)
 	}
@@ -284,7 +291,7 @@ func TestStartFollowsTheLog(t *testing.T) {
 	waitFor(t, 10*time.Second, "lane 2 replaced", func() bool { return roomsOf(exit)[1] != first[1] })
 	want := roomsOf(exit)
 	waitFor(t, 10*time.Second, "the new list in the log", func() bool {
-		gen, ids, _ := parseCtlLog(f.logText(exit.rot.ctlID))
+		gen, ids, _, _ := parseCtlLog(f.logText(exit.rot.ctlID))
 		return gen == 1 && sameRooms(ids, want)
 	})
 	exit.Stop()
@@ -361,4 +368,64 @@ func TestLanesGetNewRoomsBeforeTheirBudgetRunsOut(t *testing.T) {
 		defer exit.rot.mu.Unlock()
 		return len(exit.rot.busy) == 0
 	})
+}
+
+// A lane whose rooms run out takes a spare pair at once, and the reserve is
+// made up again.
+func TestSparePairTakesOver(t *testing.T) {
+	fastRotation(t)
+	old := sparePairs
+	sparePairs = 1
+	t.Cleanup(func() { sparePairs = old })
+	newFakeAvito(t, time.Millisecond)
+	cfg := fastConfig()
+	cfg.NumRooms = 2
+	exit, client := startStripedPair(t, cfg)
+	var spare [2]string
+	waitFor(t, 10*time.Second, "a spare pair", func() bool {
+		exit.rot.mu.Lock()
+		defer exit.rot.mu.Unlock()
+		if len(exit.rot.spares) == 1 {
+			spare = exit.rot.spares[0]
+			return true
+		}
+		return false
+	})
+	first := roomsOf(exit)
+	exit.replaceLaneOf(first[0], "test")
+	waitFor(t, 10*time.Second, "lane 1 on the spare pair at both ends", func() bool {
+		now := roomsOf(exit)
+		return now[0] == spare[0] && now[len(now)/2] == spare[1] && sameRooms(roomsOf(client), now) &&
+			roomsFollow(exit, now) && roomsFollow(client, now)
+	})
+	waitFor(t, 10*time.Second, "the reserve made up", func() bool {
+		exit.rot.mu.Lock()
+		defer exit.rot.mu.Unlock()
+		return len(exit.rot.spares) == 1 && exit.rot.spares[0] != spare
+	})
+	checkStillCarries(t, exit, client)
+}
+
+// What a room carried is in the log, and a restarted exit counts on from it.
+func TestRoomUseSurvivesARestart(t *testing.T) {
+	fastRotation(t)
+	oldLow, oldHigh := budgetLow, budgetHigh
+	budgetLow, budgetHigh = 100<<20, 200<<20 // no replacement during the test
+	t.Cleanup(func() { budgetLow, budgetHigh = oldLow, oldHigh })
+	f := newFakeAvito(t, time.Millisecond)
+	cfg := fastConfig()
+	cfg.NumRooms = 2
+	exit := mustStart(t, "", false, cfg)
+	link := exit.RoomList()
+	room := roomsOf(exit)[0]
+	exit.rot.ctl.append(fmt.Sprintf("U %s %d", room, 7<<20))
+	waitFor(t, 10*time.Second, "the use in the log", func() bool {
+		return strings.Contains(f.logText(exit.rot.ctlID), "U "+room+" ")
+	})
+	exit.Stop()
+	again := mustStart(t, link, false, cfg)
+	if u := again.txWss[0].used(); u < 7<<20 {
+		t.Fatalf("the restarted exit counts %d bytes for room %s, want at least 7 MB", u, room[:8])
+	}
+	waitFor(t, 10*time.Second, "the restarted exit's rooms up", func() bool { return allConnected(again) })
 }

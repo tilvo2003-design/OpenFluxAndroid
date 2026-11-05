@@ -18,7 +18,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.15.4'
+        default: '3.15.5'
         required: true
       core:
         description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
@@ -66,6 +66,7 @@ jobs:
           python3 .github/patches/avito_join_new.py OpenFlux/transport/avito/avito.go
           python3 .github/patches/avito_gate_refund.py OpenFlux/transport/avito
           python3 .github/patches/avito_rotate.py OpenFlux/transport/avito
+          python3 .github/patches/avito_join_batch.py OpenFlux/transport/avito
           python3 .github/patches/avito_mux.py OpenFlux/transport/avito
           python3 .github/patches/stripe_watch_source.py OpenFlux/transport
           python3 .github/patches/avito_stripe_tuning.py OpenFlux/transport/avito

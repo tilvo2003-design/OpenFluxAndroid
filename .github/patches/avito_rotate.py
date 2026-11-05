@@ -50,6 +50,7 @@ patch("avito.go", [
 	idMu       sync.Mutex
 	snap       string
 	budgetBase atomic.Uint64 // bytesSent+bytesRecv when this side moved into the room
+	prior      atomic.Uint64 // what the room carried before this start (from the control room)
 """, 1),
     ("""	data, _ := doc["data"].(string)
 	w.docLen = len(data)

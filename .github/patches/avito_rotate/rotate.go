@@ -62,6 +62,21 @@ var (
 	budgetEvery           = 5 * time.Second
 )
 
+// sparePairs is how many joined, unused room pairs the exit keeps for lanes
+// whose rooms run out (AVITO_SPARE_PAIRS, 0: none); usageStep is how often a
+// room's use is written to the control room, for the next start.
+var (
+	sparePairs        = spareFromEnv()
+	usageStep  uint64 = 2 << 20
+)
+
+func spareFromEnv() int {
+	if n, err := strconv.Atoi(os.Getenv("AVITO_SPARE_PAIRS")); err == nil && n >= 0 {
+		return n
+	}
+	return 2
+}
+
 func budgetFromEnv() (uint64, uint64) {
 	hi := uint64(envKB("AVITO_BUDGET_MB", 12)) << 20
 	return hi / 2, hi
@@ -137,6 +152,14 @@ type rotation struct {
 	budgetEvery                       time.Duration
 	told                              map[string]bool // client: rooms reported spent
 
+	// Exit: joined rooms in reserve, and what each room carried (from the log
+	// at start, and as written to it).
+	spareWant int
+	spares    [][2]string
+	refilling bool
+	prior     map[string]uint64
+	recorded  map[string]uint64
+
 	create sync.Mutex // the exit makes one lane's rooms at a time
 }
 
@@ -148,9 +171,7 @@ func (t *AvitoTransport) makeCtlRoom(n int) {
 	for attempt := 0; attempt < 5; attempt++ {
 		id, err := createRoom(t.ctx, t.cookies)
 		if err == nil {
-			if jerr := registerRoom(t.ctx, id); jerr != nil && t.ctx.Err() == nil {
-				utils.Debugf("[AVITO] join control room %s: %v (joined later)", id[:8], jerr)
-			}
+			// Joined with the rooms (avito_join_batch.py).
 			t.rot.ctlID = id
 			utils.Infof("[AVITO] created control room %s: a lane gets new rooms when Avito stops taking data in them", id[:8])
 			return
@@ -176,6 +197,7 @@ func (t *AvitoTransport) startRotation(ids []string) []string {
 	r.mu.Lock()
 	r.ids = append([]string(nil), ids...)
 	r.budgetLow, r.budgetHigh, r.quickBytes, r.budgetEvery = budgetLow, budgetHigh, laneQuickBytes, budgetEvery
+	r.spareWant = sparePairs
 	r.mu.Unlock()
 	r.ctl = newCtlLog(t, r.ctlID, t.onCtlText)
 	go r.ctl.run()
@@ -219,12 +241,72 @@ func (t *AvitoTransport) wireRotation() {
 			id := r.ids[p]
 			w.next.Store(&id)
 		}
+		w.prior.Store(r.prior[r.ids[p]]) // what the room carried before this start
 	}
 	r.byPos = byPos
 	if !t.isClient && !r.budget {
 		r.budget = true
 		go t.budgetLoop()
+		go t.refillSpares()
 	}
+}
+
+// takeSpare hands out a pair from the reserve.
+func (t *AvitoTransport) takeSpare() (string, string, bool) {
+	r := &t.rot
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.spares) == 0 {
+		return "", "", false
+	}
+	p := r.spares[0]
+	r.spares = r.spares[1:]
+	return p[0], p[1], true
+}
+
+// refillSpares (exit) tops the reserve up to spareWant pairs: rooms made now
+// and joined together, so a lane whose rooms run out moves at once.
+func (t *AvitoTransport) refillSpares() {
+	r := &t.rot
+	r.mu.Lock()
+	need := r.spareWant - len(r.spares)
+	if t.isClient || r.refilling || need <= 0 {
+		r.mu.Unlock()
+		return
+	}
+	r.refilling = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.refilling = false
+		r.mu.Unlock()
+	}()
+	var ids []string
+	for len(ids) < 2*need {
+		id, err := createRoom(t.ctx, t.cookies)
+		if err != nil {
+			if t.ctx.Err() != nil {
+				return
+			}
+			utils.Debugf("[AVITO] spare room: %v (again in 30 s)", err)
+			if !sleepCtx(t.ctx, 30*time.Second) {
+				return
+			}
+			continue
+		}
+		ids = append(ids, id)
+		if !sleepCtx(t.ctx, t.config.RoomCreatePause) {
+			return
+		}
+	}
+	t.joinRooms(ids)
+	r.mu.Lock()
+	for i := 0; i+1 < len(ids); i += 2 {
+		r.spares = append(r.spares, [2]string{ids[i], ids[i+1]})
+	}
+	n := len(r.spares)
+	r.mu.Unlock()
+	utils.Infof("[AVITO] %d spare room pair(s) ready", n)
 }
 
 // budgetLoop (exit) replaces a lane's rooms once one of them took its budget.
@@ -241,6 +323,23 @@ func (t *AvitoTransport) budgetLoop() {
 		r.mu.Lock()
 		byPos := r.byPos
 		r.mu.Unlock()
+		// What each room carried, into the log now and then: a restart goes
+		// on counting from there.
+		for _, w := range byPos {
+			u, id := w.used(), w.room()
+			r.mu.Lock()
+			if r.recorded == nil {
+				r.recorded = map[string]uint64{}
+			}
+			write := u >= r.recorded[id]+usageStep
+			if write {
+				r.recorded[id] = u
+			}
+			r.mu.Unlock()
+			if write {
+				r.ctl.append(fmt.Sprintf("U %s %d", id, u))
+			}
+		}
 		half := len(byPos) / 2
 		for lane := 0; lane < half; lane++ {
 			used := max(byPos[lane].used(), byPos[half+lane].used())
@@ -253,13 +352,14 @@ func (t *AvitoTransport) budgetLoop() {
 
 func mb(n uint64) float64 { return float64(n) / (1 << 20) }
 
-// used is what this room carried since this side moved into it.
+// used is what this room carried: before this start (prior, from the log)
+// and since this side moved into it.
 func (w *avitoWS) used() uint64 {
 	total := w.stats.bytesSent.Load() + w.stats.bytesRecv.Load()
 	if base := w.budgetBase.Load(); total > base {
-		return total - base
+		return w.prior.Load() + total - base
 	}
-	return 0
+	return w.prior.Load()
 }
 
 // roomSpent: Avito refuses this side's data in room id.
@@ -283,7 +383,18 @@ func (t *AvitoTransport) roomSpent(id string) {
 }
 
 func (t *AvitoTransport) onCtlText(text string) {
-	gen, ids, spent := parseCtlLog(text)
+	gen, ids, spent, used := parseCtlLog(text)
+	if !t.isClient && len(used) > 0 {
+		r := &t.rot
+		r.mu.Lock()
+		if r.prior == nil {
+			r.prior = map[string]uint64{}
+		}
+		for id, u := range used {
+			r.prior[id] = max(r.prior[id], u)
+		}
+		r.mu.Unlock()
+	}
 	if gen > 0 {
 		t.adoptRooms(gen, ids)
 	}
@@ -295,8 +406,8 @@ func (t *AvitoTransport) onCtlText(text string) {
 }
 
 // parseCtlLog reads the log: the latest room list and its generation (0 if
-// none), and the rooms reported spent.
-func parseCtlLog(text string) (gen int, ids []string, spent []string) {
+// none), the rooms reported spent, and what the exit wrote each room carried.
+func parseCtlLog(text string) (gen int, ids []string, spent []string, used map[string]uint64) {
 	best := ""
 	for _, line := range strings.Split(text, "\n") {
 		f := strings.Fields(line)
@@ -313,9 +424,16 @@ func parseCtlLog(text string) (gen int, ids []string, spent []string) {
 			gen, ids, best = g, list, f[2]
 		case len(f) == 2 && f[0] == "S" && f[1] != "":
 			spent = append(spent, f[1])
+		case len(f) == 3 && f[0] == "U":
+			if n, err := strconv.ParseUint(f[2], 10, 64); err == nil {
+				if used == nil {
+					used = map[string]uint64{}
+				}
+				used[f[1]] = max(used[f[1]], n)
+			}
 		}
 	}
-	return gen, ids, spent
+	return gen, ids, spent, used
 }
 
 // adoptRooms moves this side to the rooms of generation gen.
@@ -417,8 +535,10 @@ func (t *AvitoTransport) replaceLane(lane int, why string) {
 		}
 		r.create.Lock()
 		defer r.create.Unlock()
-		a, b, ok := t.newLaneRooms()
-		if !ok {
+		a, b, ok := t.takeSpare()
+		if ok {
+			go t.refillSpares()
+		} else if a, b, ok = t.newLaneRooms(); !ok {
 			return
 		}
 		r.mu.Lock()
@@ -434,16 +554,19 @@ func (t *AvitoTransport) replaceLane(lane int, why string) {
 	}()
 }
 
-// newLaneRooms creates and joins two rooms, trying until the transport stops.
+// newLaneRooms creates two rooms and joins them together, trying until the
+// transport stops.
 func (t *AvitoTransport) newLaneRooms() (string, string, bool) {
 	var out [2]string
+	defer func() {
+		if out[1] != "" {
+			t.joinRooms(out[:])
+		}
+	}()
 	for k := range out {
 		for attempt := 0; ; attempt++ {
 			id, err := createRoom(t.ctx, t.cookies)
 			if err == nil {
-				if jerr := registerRoom(t.ctx, id); jerr != nil && t.ctx.Err() == nil {
-					utils.Debugf("[AVITO] join new room %s: %v (joined later)", id[:8], jerr)
-				}
 				out[k] = id
 				break
 			}
@@ -473,6 +596,7 @@ func (w *avitoWS) room() string {
 // again.
 func (w *avitoWS) moveTo(id string) {
 	w.budgetBase.Store(w.stats.bytesSent.Load() + w.stats.bytesRecv.Load())
+	w.prior.Store(0)
 	w.next.Store(&id)
 	w.writeMu.Lock()
 	if w.conn != nil {
