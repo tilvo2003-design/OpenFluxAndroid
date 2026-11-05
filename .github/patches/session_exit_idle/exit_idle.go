@@ -7,6 +7,7 @@ package transport
 
 import (
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"sync/atomic"
@@ -94,6 +95,65 @@ func (s *Session) trimWhileIdle(every time.Duration) {
 			debug.FreeOSMemory()
 			trimmed = now
 			utils.Debugf("[SESSION] exit idle: memory handed back to the system")
+		}
+	}
+}
+
+// idleProcs is how many threads an idle exit runs Go code on
+// (OPENFLUX_IDLE_PROCS, 0 keeps them all). An idle exit's work is a few
+// small packets and timers a second, but each wakeup on an 8-core phone set
+// the scheduler hunting across eight Ps for more: a fresh exit with nobody
+// connected spent 70% of its ~30% of a core in the scheduler, not in work.
+var idleProcs = func() int {
+	if n, err := strconv.Atoi(os.Getenv("OPENFLUX_IDLE_PROCS")); err == nil && n >= 0 {
+		return n
+	}
+	return 2
+}()
+
+// idleProcsAfter is how long an exit is idle before it narrows (atomic, as
+// idleTrimAfter).
+var idleProcsAfter atomic.Int64
+
+func init() { idleProcsAfter.Store(int64(30 * time.Second)) }
+
+// procsWhileIdle narrows the exit to idleProcs once it has been without a
+// client idleProcsAfter, and gives back every thread within a second of the
+// client being heard.
+func (s *Session) procsWhileIdle(every time.Duration) {
+	if idleProcs <= 0 {
+		return
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	full := 0 // the thread count to go back to while ours is in force
+	var idleSince time.Time
+	defer func() {
+		if full > 0 {
+			runtime.GOMAXPROCS(full)
+		}
+	}()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		idle := s.exitIdle()
+		if !idle {
+			idleSince = time.Time{}
+		} else if idleSince.IsZero() {
+			idleSince = time.Now()
+		}
+		switch {
+		case idle && full == 0 && time.Since(idleSince) >= time.Duration(idleProcsAfter.Load()):
+			if n := runtime.GOMAXPROCS(0); n > idleProcs {
+				full = runtime.GOMAXPROCS(idleProcs)
+				utils.Debugf("[SESSION] exit idle: Go on %d of %d threads", idleProcs, full)
+			}
+		case !idle && full > 0:
+			runtime.GOMAXPROCS(full)
+			full = 0
 		}
 	}
 }

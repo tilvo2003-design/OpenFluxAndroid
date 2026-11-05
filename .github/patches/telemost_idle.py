@@ -6,10 +6,11 @@ to send: filler that keeps the SFU forwarding. Each frame is packetized,
 encrypted (SRTP) and sent, and the SFU sends it back as a self-view that is
 decrypted and decoded too - most of the CPU of an exit with nobody
 connected, more after a client's visit left it more lanes. While the exit
-has no client (transport.ExitIdle, session_exit_idle.py) the filler goes out
-on every 12th tick (TELEMOST_IDLE_FPS, default 10; 0 keeps 120): still a
-steady stream. Data always goes out at once, so a client's handshake is not
-held back, and the full rate is back the moment the client is heard.
+has no client (transport.ExitIdle, session_exit_idle.py) the clock runs at
+TELEMOST_IDLE_FPS (default 10; 0 keeps 120): still a steady stream, and the
+process is woken 10 times a second per lane, not 120. Data waits at most
+one idle tick, and the full rate is back the moment the client is heard or
+data is to be sent.
 
 usage: telemost_idle.py path/to/core/transport/yandex/telemost.go
 """
@@ -30,8 +31,7 @@ pairs = [
 	if t.isExitNode && telemostIdleFPS > 0 && telemostIdleFPS < publishFPS {
 		idleEvery = publishFPS / telemostIdleFPS
 	}
-	idleTick := 0
-	idle, idleAt := false, time.Time{}
+	idle, slow, idleAt := false, false, time.Time{}
 	for range ticker.C {
 		if !t.IsRunning() || !t.trackReady.Load() {
 			continue
@@ -41,17 +41,23 @@ pairs = [
     ("""		if len(frames) == 0 {
 			frames = [][]byte{filler(sent)}
 		}
-		// Spread this tick's frames evenly across the tick instead of""", """		if len(frames) == 0 {
-			if idleEvery > 0 {
-				if now := time.Now(); now.Sub(idleAt) > 500*time.Millisecond {
-					idle, idleAt = transport.ExitIdle(), now
-				}
-				if idle {
-					if idleTick++; idleTick%idleEvery != 0 {
-						continue
-					}
-				}
+		// Spread this tick's frames evenly across the tick instead of""", """		if idleEvery > 0 {
+			// While idle the clock itself runs at the idle rate: skipping
+			// ticks still woke the process 120 times a second per lane,
+			// and on a phone each wakeup costs more than the frame.
+			if now := time.Now(); slow || now.Sub(idleAt) > 500*time.Millisecond {
+				idle, idleAt = transport.ExitIdle(), now
 			}
+			switch {
+			case idle && !slow && len(frames) == 0:
+				ticker.Reset(frameInterval * time.Duration(idleEvery))
+				slow = true
+			case slow && (!idle || len(frames) > 0):
+				ticker.Reset(frameInterval)
+				slow = false
+			}
+		}
+		if len(frames) == 0 {
 			frames = [][]byte{filler(sent)}
 		}
 		// Spread this tick's frames evenly across the tick instead of""", 1),

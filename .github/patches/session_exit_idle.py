@@ -5,7 +5,9 @@ transport.ExitIdle() is true while the exit has no client (none yet, or the
 one it had is heard on no carrier for 30 s); telemost_idle.py uses it. While
 idle a minute, and every 10 minutes after, the exit returns the memory it
 used for a client's traffic to the system (an exit held ~200 MB for hours
-after its client left, against ~30 MB before the first one came).
+after its client left, against ~30 MB before the first one came), collects
+at a lower GC target, and runs Go on 2 threads (OPENFLUX_IDLE_PROCS) - all
+of them again within a second of the client being heard.
 
 usage: session_exit_idle.py path/to/core/transport
 """
@@ -26,6 +28,7 @@ new = """func (s *Session) keepaliveLoop() {
 		f := s.exitIdle
 		exitIdleFn.Store(&f)
 		go s.trimWhileIdle(30 * time.Second)
+		go s.procsWhileIdle(time.Second)
 	}
 """
 if src.count(old) != 1:

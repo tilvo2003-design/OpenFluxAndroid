@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"runtime"
 	"runtime/debug"
 	"testing"
 	"time"
@@ -35,4 +36,19 @@ func TestIdleExitCollectsSooner(t *testing.T) {
 	eventually(t, "the idle target", func() bool { return gogc() == idleGOGC })
 	startPair(t, client, exit)
 	eventually(t, "the configured target with a client", func() bool { return gogc() == 300 })
+}
+
+// An idle exit runs on idleProcs threads, and on all of them once its client
+// is heard.
+func TestIdleExitNarrowsThreads(t *testing.T) {
+	old := runtime.GOMAXPROCS(8)
+	defer runtime.GOMAXPROCS(old)
+	after := idleProcsAfter.Swap(0)
+	defer idleProcsAfter.Store(after)
+	client, exit, _, _ := linkedSessions(t, "direct", "yandex")
+	fastKeepalive(client, exit)
+	go exit.procsWhileIdle(10 * time.Millisecond)
+	eventually(t, "idle threads", func() bool { return runtime.GOMAXPROCS(0) == idleProcs })
+	startPair(t, client, exit)
+	eventually(t, "every thread with a client", func() bool { return runtime.GOMAXPROCS(0) == 8 })
 }
