@@ -6,7 +6,9 @@ package transport
 // client's traffic took goes back to the system.
 
 import (
+	"os"
 	"runtime/debug"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -30,13 +32,39 @@ func (s *Session) exitIdle() bool {
 	return !s.ready || s.peerSilentLocked()
 }
 
+// idleGOGC is the GC target of an idle exit (OPENFLUX_IDLE_GOGC, 0 keeps
+// the configured one). The panel runs the nodes at GOGC=300 for speed: the
+// heap may grow to four times what is live before a collection, and an idle
+// exit's live ~40 MB then took ~180 MB, given back by FreeOSMemory and taken
+// again within seconds by whatever still arrives.
+var idleGOGC = func() int {
+	if n, err := strconv.Atoi(os.Getenv("OPENFLUX_IDLE_GOGC")); err == nil && n >= 0 {
+		return n
+	}
+	return 50
+}()
+
+// idleTrimAfter is how long an exit is idle before it trims (atomic: tests
+// shorten it while other sessions' loops run).
+var idleTrimAfter atomic.Int64
+
+func init() { idleTrimAfter.Store(int64(time.Minute)) }
+
 // trimWhileIdle hands the memory of a client's traffic back to the system
 // once the exit has been idle a minute, and again every 10 minutes: Go keeps
 // freed memory for reuse, and an exit kept a client's ~200 MB for hours.
+// While idle the GC target is idleGOGC; the configured one is back the
+// moment the client is heard.
 func (s *Session) trimWhileIdle(every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	var idleSince, trimmed time.Time
+	gogc := -1 // the configured target while ours is in force
+	defer func() {
+		if gogc >= 0 {
+			debug.SetGCPercent(gogc)
+		}
+	}()
 	for {
 		select {
 		case <-s.done:
@@ -45,13 +73,24 @@ func (s *Session) trimWhileIdle(every time.Duration) {
 		}
 		now := time.Now()
 		if !s.exitIdle() {
+			if gogc >= 0 {
+				debug.SetGCPercent(gogc)
+				gogc = -1
+			}
 			idleSince, trimmed = time.Time{}, time.Time{}
 			continue
 		}
 		if idleSince.IsZero() {
 			idleSince = now
 		}
-		if now.Sub(idleSince) >= time.Minute && (trimmed.IsZero() || now.Sub(trimmed) >= 10*time.Minute) {
+		if now.Sub(idleSince) >= time.Duration(idleTrimAfter.Load()) && (trimmed.IsZero() || now.Sub(trimmed) >= 10*time.Minute) {
+			if gogc < 0 && idleGOGC > 0 {
+				if prev := debug.SetGCPercent(idleGOGC); prev > idleGOGC {
+					gogc = prev
+				} else {
+					debug.SetGCPercent(prev) // already lower (or off): leave it
+				}
+			}
 			debug.FreeOSMemory()
 			trimmed = now
 			utils.Debugf("[SESSION] exit idle: memory handed back to the system")
