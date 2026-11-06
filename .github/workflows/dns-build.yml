@@ -18,7 +18,7 @@ on:
         required: true
       version:
         description: 'Version shown in the app (X.Y.Z)'
-        default: '3.15.5'
+        default: '3.15.6'
         required: true
       core:
         description: 'Core: a p1neappleXpress/OpenFlux tag (the one the node runs), or "submodule" for the one this app pins'
