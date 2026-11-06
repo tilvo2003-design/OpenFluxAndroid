@@ -74,11 +74,10 @@ internal class PacketTunnel(
     private fun writeIncoming() {
         try {
             while (active) {
-                val packet = Mobile.read()
-                if (packet == null || packet.isEmpty()) {
-                    Thread.sleep(2)
-                    continue
-                }
+                // Waits for the next packet instead of asking every 2 ms: the
+                // poll woke the phone 500 times a second even with no traffic.
+                val packet = Mobile.readTimeout(READ_WAIT_MS)
+                if (packet == null || packet.isEmpty()) continue
                 inject(packet)
                 received.addAndGet(packet.size.toLong())
             }
@@ -148,6 +147,9 @@ internal class PacketTunnel(
 
     private companion object {
         const val WRITE_RETRIES = 8
+
+        /** How long [writeIncoming] waits for a packet before it looks at [active] again. */
+        const val READ_WAIT_MS = 250L
 
         fun isCongestion(e: IOException): Boolean {
             val m = e.message.orEmpty()

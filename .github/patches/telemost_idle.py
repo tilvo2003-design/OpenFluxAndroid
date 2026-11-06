@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telemost: an exit without a client sends its filler at 10 frames a second.
+"""Telemost: a lane with nothing to carry sends its filler at 10 frames a second.
 
 Every lane publishes a frame each 1/120 s whether or not there is anything
 to send: filler that keeps the SFU forwarding. Each frame is packetized,
@@ -11,6 +11,11 @@ TELEMOST_IDLE_FPS (default 10; 0 keeps 120): still a steady stream, and the
 process is woken 10 times a second per lane, not 120. Data waits at most
 one idle tick, and the full rate is back the moment the client is heard or
 data is to be sent.
+
+The same on both sides for a lane that has carried nothing for 5 s
+(TELEMOST_QUIET_MS): with the session on direct, Telemost is the reserve,
+and its three lanes each sent and took 120 frames a second for nothing -
+on the phone too, where it costs battery.
 
 usage: telemost_idle.py path/to/core/transport/yandex/telemost.go
 """
@@ -26,12 +31,14 @@ pairs = [
 		}
 		frames := t.popFrames()
 """, """	sent := 0
-	// An exit without a client sends its filler slower (telemost_idle.py).
+	// A lane with nothing to carry, and an exit without a client, send
+	// their filler slower (telemost_idle.py).
 	idleEvery := 0
-	if t.isExitNode && telemostIdleFPS > 0 && telemostIdleFPS < publishFPS {
+	if telemostIdleFPS > 0 && telemostIdleFPS < publishFPS {
 		idleEvery = publishFPS / telemostIdleFPS
 	}
 	idle, slow, idleAt := false, false, time.Time{}
+	var lastData time.Time
 	for range ticker.C {
 		if !t.IsRunning() || !t.trackReady.Load() {
 			continue
@@ -45,14 +52,22 @@ pairs = [
 			// While idle the clock itself runs at the idle rate: skipping
 			// ticks still woke the process 120 times a second per lane,
 			// and on a phone each wakeup costs more than the frame.
-			if now := time.Now(); slow || now.Sub(idleAt) > 500*time.Millisecond {
+			// The same when the lane has had nothing to carry for
+			// telemostQuiet: the session runs over another carrier (direct)
+			// and keeps this one in reserve.
+			now := time.Now()
+			if len(frames) > 0 {
+				lastData = now
+			}
+			if t.isExitNode && (slow || now.Sub(idleAt) > 500*time.Millisecond) {
 				idle, idleAt = transport.ExitIdle(), now
 			}
+			rest := idle || (telemostQuiet > 0 && now.Sub(lastData) >= telemostQuiet)
 			switch {
-			case idle && !slow && len(frames) == 0:
+			case rest && !slow && len(frames) == 0:
 				ticker.Reset(frameInterval * time.Duration(idleEvery))
 				slow = true
-			case slow && (!idle || len(frames) > 0):
+			case slow && (!rest || len(frames) > 0):
 				ticker.Reset(frameInterval)
 				slow = false
 			}
@@ -73,6 +88,19 @@ var telemostIdleFPS = func() int {
 		}
 	}
 	return 10
+}()
+
+// telemostQuiet is how long a lane carries nothing before its filler drops
+// to telemostIdleFPS (telemost_idle.py; TELEMOST_QUIET_MS, 0 = never): with
+// the session on direct, the reserve carrier's lanes still sent and took
+// 120 frames a second each, on the phone and on the exit.
+var telemostQuiet = func() time.Duration {
+	if v, ok := os.LookupEnv("TELEMOST_QUIET_MS"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 5 * time.Second
 }()
 """, 1),
 ]
