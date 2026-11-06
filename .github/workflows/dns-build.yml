@@ -78,6 +78,9 @@ jobs:
           python3 .github/patches/session_exit_idle.py OpenFlux/transport
           python3 .github/patches/telemost_idle.py OpenFlux/transport/yandex/telemost.go
           python3 .github/patches/telemost_idle_remb.py OpenFlux/transport/yandex/telemost.go
+          python3 .github/patches/telemost_sub_nack.py OpenFlux/transport/yandex/telemost.go
+          python3 .github/patches/stripe_idle_wakeups.py OpenFlux/transport/striped.go
+          python3 .github/patches/avito_idle_poll.py OpenFlux/transport/avito/stripe.go
           python3 .github/patches/carrier_health.py OpenFlux
           python3 .github/patches/rooms_progress.py OpenFlux
           python3 .github/patches/cups_shared_session.py OpenFlux/transport/cupsonline
